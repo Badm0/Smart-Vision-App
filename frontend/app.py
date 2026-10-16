@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import sys
 import time
@@ -177,7 +178,7 @@ def panic_panel() -> None:
     st.markdown(w.panic_result_html(ss.panic_result), unsafe_allow_html=True)
 
 
-# ------------------------------------------------------------------ Relay Video Logic
+# ------------------------------------------------------------------ Relay Video Logic (Base64 + OpenCV)
 def close_relay_stream() -> None:
     pass
 
@@ -193,8 +194,20 @@ def render_relay(source: dict) -> None:
             while cap.isOpened():
                 ret, frame = cap.read()
                 if ret:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    video_placeholder.image(frame, use_container_width=True)
+                    # 1. ضغط الإطار كصورة JPEG خفيفة
+                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    
+                    # 2. تشفير الصورة كنص Base64
+                    b64 = base64.b64encode(buffer).decode("utf-8")
+                    
+                    # 3. حقن الصورة مباشرة في الواجهة بدون أي HTTP Request
+                    video_placeholder.markdown(
+                        f"<img src='data:image/jpeg;base64,{b64}' style='width: 100%; border-radius: 8px;'>",
+                        unsafe_allow_html=True
+                    )
+                    
+                    # 4. تحديد السرعة بـ ~30 إطار بالثانية لمنع اختناق المعالج
+                    time.sleep(0.03)
                 else:
                     st.info("Video stream ended.")
                     break
