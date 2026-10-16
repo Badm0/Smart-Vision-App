@@ -1,10 +1,13 @@
 """Backend tests. They use the mock detector, so no weights or GPU are needed."""
 import os
 import time
+from pathlib import Path
 
 os.environ["SV_MOCK_DETECTOR"] = "1"
 os.environ["SV_UPLOAD_DIR"] = "/tmp/sv_test_uploads"
+os.environ["SV_INCIDENT_DIR"] = "/tmp/sv_test_incidents"
 os.environ["SV_CONFIRM_FRAMES"] = "2"
+os.environ["SV_LOOP_VIDEO"] = "0"
 
 import cv2
 import numpy as np
@@ -13,6 +16,24 @@ from fastapi.testclient import TestClient
 
 from backend.preprocessing import Preprocessor, boxes_to_source, ensure_bgr_uint8
 from backend.telemetry import TelemetryStore
+from frontend.client import SmartVisionClient
+
+
+def test_default_model_path_prefers_engine_and_falls_back_to_pt(tmp_path, monkeypatch):
+    from backend.config import get_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SV_MODEL_PATH", raising=False)
+    monkeypatch.setenv("SV_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("SV_INCIDENT_DIR", str(tmp_path / "incidents"))
+    get_settings.cache_clear()
+    try:
+        assert get_settings().model_path == "best.pt"
+        Path("best.engine").touch()
+        get_settings.cache_clear()
+        assert get_settings().model_path == "best.engine"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_letterbox_shape_and_box_roundtrip():
@@ -48,6 +69,36 @@ def test_telemetry_cooldown_and_counts():
     assert snap["total_threats"] == 2
     assert snap["last_incident"]["label"] == "knife"
     assert snap["alerts"][0]["label"] == "knife"  # newest first
+
+
+def test_mjpeg_relay_parser_handles_fragmented_multipart_chunks():
+    frames = [b"\xff\xd8frame-one\xff\xd9", b"\xff\xd8frame-two\xff\xd9"]
+    parts = [
+        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+        + str(len(frame)).encode()
+        + b"\r\n\r\n" + frame + b"\r\n"
+        for frame in frames
+    ]
+    body = b"".join(parts) + b"--frame--\r\n"
+
+    class FakeResponse:
+        headers = {"content-type": "multipart/x-mixed-replace; boundary=frame"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            yield from (body[index:index + 7] for index in range(0, len(body), 7))
+
+    client = SmartVisionClient("http://127.0.0.1:8000")
+    client._http.get = lambda *args, **kwargs: FakeResponse()
+    assert list(client.relay_frames("source")) == frames
 
 
 @pytest.fixture(scope="module")
@@ -95,6 +146,12 @@ def test_image_upload_annotates_and_logs_threat(client):
     jpg = client.get(f"/api/sources/{src['id']}/image")
     assert jpg.headers["content-type"] == "image/jpeg"
     assert client.get("/api/telemetry").json()["total_threats"] >= 1
+    incidents = client.get("/api/incidents").json()
+    assert incidents and incidents[0]["filename"].endswith(".jpg")
+    incident = client.get(incidents[0]["url"])
+    assert incident.headers["content-type"] == "image/jpeg"
+    assert incident.content.startswith(b"\xff\xd8")
+    assert client.get("/api/incidents/../bad.jpg").status_code == 404
 
 
 def test_video_stream_yields_jpeg_frames_in_real_time(client, video_bytes):

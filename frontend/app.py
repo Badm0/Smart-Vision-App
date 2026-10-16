@@ -15,8 +15,8 @@ import streamlit.components.v1 as components
 from frontend import theme, widgets as w
 from frontend.client import ApiError, SmartVisionClient
 
-API_URL = os.getenv("SV_API_URL", "http://127.0.0.1:8000")            # Streamlit server -> API
-PUBLIC_API_URL = os.getenv("SV_PUBLIC_API_URL", API_URL)               # browser -> API
+API_URL = (os.getenv("SV_API_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
+PUBLIC_API_URL = (os.getenv("SV_PUBLIC_API_URL") or API_URL).strip().rstrip("/")
 OPERATOR = os.getenv("SV_OPERATOR_NAME", "Operator 01")
 ROLE = os.getenv("SV_OPERATOR_ROLE", "Shift lead")
 STATION = os.getenv("SV_STATION", "SOC station 01")
@@ -50,11 +50,16 @@ def get_snapshot(limit: int = 40) -> dict | None:
     return get_client().telemetry(limit)
 
 
+@st.cache_data(ttl=2, show_spinner=False)
+def get_incidents() -> list[dict] | None:
+    return get_client().incidents()
+
+
 client = get_client()
 ss = st.session_state
 for key, default in {
     "source": None, "upload_key": None, "upload_error": None,
-    "panic_armed": False, "panic_result": None,
+    "panic_armed": False, "panic_result": None, "relay": True,
 }.items():
     ss.setdefault(key, default)
 
@@ -63,8 +68,10 @@ health = get_health()
 
 # ------------------------------------------------------------------ polled panels
 @st.fragment(run_every="1s")
-def telemetry_fragment() -> None:
+def telemetry_fragment(source_id: str | None = None) -> None:
     st.markdown(w.telemetry_html(get_snapshot()), unsafe_allow_html=True)
+    if source_id:
+        st.markdown(w.live_status_html(client.stats(source_id)), unsafe_allow_html=True)
 
 
 @st.fragment(run_every="1s")
@@ -72,8 +79,13 @@ def alerts_fragment() -> None:
     st.markdown(w.alerts_html(get_snapshot()), unsafe_allow_html=True)
 
 
+@st.fragment(run_every="3s")
+def navbar_fragment() -> None:
+    embed(w.navbar_html(OPERATOR, ROLE, get_health()), w.NAVBAR_HEIGHT)
+
+
 # ------------------------------------------------------------------ top bar and sidebar
-embed(w.navbar_html(PUBLIC_API_URL, OPERATOR, ROLE), w.NAVBAR_HEIGHT)
+navbar_fragment()
 
 with st.sidebar:
     st.markdown(w.profile_html(OPERATOR, ROLE, STATION), unsafe_allow_html=True)
@@ -121,7 +133,7 @@ def source_panel() -> None:
                     unsafe_allow_html=True)
     st.toggle(
         "Relay frames through Streamlit", key="relay",
-        help="Use only if your browser cannot reach the API directly. Slower and less smooth than the default.",
+        help="Recommended: Streamlit fetches and displays frames, avoiding browser CORS and tunnel issues. Turn off only when the browser can reach the API directly.",
     )
 
 
@@ -151,30 +163,41 @@ def panic_panel() -> None:
     st.markdown(w.panic_result_html(ss.panic_result), unsafe_allow_html=True)
 
 
-# ------------------------------------------------------------------ relay fallback
-def render_relay(src: dict, tele_slot, alert_slot) -> None:
-    """Fallback transport: pull the MJPEG stream server-side and paint frames into st.empty()."""
-    if src["kind"] == "image":
-        st.image(client.image_bytes(src["id"]))
-        return
-    hud, frame = st.empty(), st.empty()
-    last_panels = 0.0
+def close_relay_stream() -> None:
+    frames = ss.get("_relay_frames")
+    if frames is not None:
+        frames.close()
+    ss["_relay_frames"] = None
+    ss["_relay_source_id"] = None
+
+
+@st.fragment(run_every=0.1)
+def relay_video_fragment(source_id: str) -> None:
+    if ss.get("_relay_source_id") != source_id or ss.get("_relay_frames") is None:
+        close_relay_stream()
+        ss["_relay_source_id"] = source_id
+        ss["_relay_frames"] = client.relay_frames(source_id)
     try:
-        for jpg in client.relay_frames(src["id"]):
-            frame.image(jpg, output_format="JPEG")
-            now = time.time()
-            if now - last_panels > 1.0:  # panels refresh at 1 Hz, video at stream rate
-                last_panels = now
-                hud.markdown(w.relay_hud_html(client.stats(src["id"])), unsafe_allow_html=True)
-                snap = client.telemetry()
-                tele_slot.markdown(w.telemetry_html(snap), unsafe_allow_html=True)
-                alert_slot.markdown(w.alerts_html(snap), unsafe_allow_html=True)
-    except requests.RequestException as exc:
-        st.markdown(w.notice("error", "Relay interrupted", f"<div>{w.escape(str(exc))}</div>"),
-                    unsafe_allow_html=True)
-    stats = client.stats(src["id"])
-    if stats:
-        hud.markdown(w.relay_hud_html(stats), unsafe_allow_html=True)
+        jpg = next(ss["_relay_frames"])
+    except StopIteration:
+        close_relay_stream()
+        st.info("Video stream ended.")
+    except (requests.RequestException, ApiError) as exc:
+        close_relay_stream()
+        st.markdown(
+            w.notice("error", "Relay interrupted", f"<div>{w.escape(str(exc))}</div>"),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.image(jpg, output_format="JPEG")
+
+
+def render_relay(source: dict) -> None:
+    if source["kind"] == "image":
+        close_relay_stream()
+        st.image(client.image_bytes(source["id"]))
+    else:
+        relay_video_fragment(source["id"])
 
 
 # ------------------------------------------------------------------ pages
@@ -189,24 +212,17 @@ def page_live() -> None:
     with src_box:
         source_panel()
     relay = bool(ss.get("relay"))
-    tele_slot = alert_slot = None
+    if not relay or not ss.source or ss.source["kind"] != "video":
+        close_relay_stream()
 
     with tele_box:
         st.markdown(w.panel_title("activity", "Daily telemetry", time.strftime("%d %b %Y")), unsafe_allow_html=True)
-        if relay:
-            tele_slot = st.empty()
-            tele_slot.markdown(w.telemetry_html(get_snapshot()), unsafe_allow_html=True)
-        else:
-            telemetry_fragment()
+        telemetry_fragment(ss.source["id"] if ss.source else None)
     with panic_box:
         panic_panel()
     with alert_box:
         st.markdown(w.panel_title("bell", "Live alerts"), unsafe_allow_html=True)
-        if relay:
-            alert_slot = st.empty()
-            alert_slot.markdown(w.alerts_html(get_snapshot()), unsafe_allow_html=True)
-        else:
-            alerts_fragment()
+        alerts_fragment()
 
     with main:
         if health is None:
@@ -218,7 +234,7 @@ def page_live() -> None:
             )
         src = ss.source
         if relay and src:
-            render_relay(src, tele_slot, alert_slot)
+            render_relay(src)
         else:
             html = w.stage_html(
                 PUBLIC_API_URL, src,
@@ -230,13 +246,34 @@ def page_live() -> None:
 
 def page_incidents() -> None:
     st.markdown("<h2 class='page-title'>Incident log</h2>"
-                "<p class='page-sub'>Confirmed threats and panic events since the backend started, newest first.</p>",
+                "<p class='page-sub'>Confirmed threats and panic events, newest first.</p>",
                 unsafe_allow_html=True)
 
     @st.fragment(run_every="2s")
     def table() -> None:
         with st.container(border=True):
             st.markdown(w.incident_table_html(get_snapshot(300)), unsafe_allow_html=True)
+        st.markdown(w.panel_title("alert", "Saved incident frames"), unsafe_allow_html=True)
+        images = get_incidents()
+        if images is None:
+            st.markdown(w.notice("warn", "Frames unavailable", "<div>The backend did not respond.</div>"),
+                        unsafe_allow_html=True)
+        elif not images:
+            st.markdown("<div class='empty'><b>No saved frames</b>Annotated frames are saved when a threat alert is confirmed.</div>",
+                        unsafe_allow_html=True)
+        else:
+            for start in range(0, min(len(images), 12), 3):
+                columns = st.columns(3)
+                for column, item in zip(columns, images[start:start + 3]):
+                    with column:
+                        try:
+                            st.image(client.incident_image(item["filename"]), use_container_width=True)
+                            caption = time.strftime(
+                                "%Y-%m-%d %H:%M:%S UTC", time.gmtime(item["created_at"])
+                            )
+                            st.caption(f"{item['filename']} · {caption}")
+                        except ApiError as exc:
+                            st.warning(str(exc))
 
     table()
 

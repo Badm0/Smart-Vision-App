@@ -9,7 +9,7 @@ smart-vision/
 │   ├── preprocessing.py  letterbox 640x640, BGR/RGB handling, CLAHE, optional denoise, box mapping
 │   ├── detector.py       YOLO wrapper (conf=0.30), thread-safe; opt-in mock detector for development
 │   ├── telemetry.py      incident store: daily counter, last incident, alert feed, cooldown
-│   ├── stream.py         frame processor, real-time MJPEG frame generator, image analysis
+│   ├── stream.py         frame processor, real-time MJPEG frame generator, incident frame saving
 │   └── api.py            FastAPI app
 ├── frontend/
 │   ├── app.py            Streamlit app (navbar, sidebar, stage, right panel, 3 pages)
@@ -26,7 +26,7 @@ smart-vision/
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp /path/to/your/best.pt ./best.pt            # or set SV_MODEL_PATH
+# place best.engine (preferred) or best.pt in the project root, or set SV_MODEL_PATH
 
 uvicorn backend.api:app --host 0.0.0.0 --port 8000     # terminal 1
 streamlit run frontend/app.py                          # terminal 2
@@ -37,17 +37,28 @@ detections. The navbar and System page label it clearly. Never use it operationa
 
 ## How smooth playback works
 
-1. The browser's image element points directly at `GET /api/sources/{id}/stream` (MJPEG). Frames are
-   painted natively, with no Streamlit reruns, so the feed cannot freeze when the page updates.
+1. By default, Streamlit reads the FastAPI `multipart/x-mixed-replace` feed server-side and paints
+   decoded JPEG frames with `st.image`. This avoids browser CORS and tunnel reachability problems.
+   Turn off relay mode only when the browser can reach the API directly for native MJPEG playback.
 2. The backend paces frames to the video's own clock. If inference is slower than the video, stale
    frames are skipped instead of queued, so the feed stays real-time rather than drifting behind.
-3. HUD values (LIVE badge, FPS, resolution, threat banner) are polled from `/stats` inside the
-   stage iframe, independent of Streamlit.
+3. FPS, detection counts, and the flashing threat alarm are polled from `/stats` and shown in the
+   Streamlit panel; direct-browser mode also renders the in-feed HUD.
 4. Alerts and telemetry refresh once per second through `st.fragment(run_every="1s")`.
 
-If the browser cannot reach the API (for example it is only exposed to the Streamlit server), turn on
-"Relay frames through Streamlit" in the Source panel. That path pulls the stream server-side and paints
-it with `st.empty()` at up to 12 FPS. It works everywhere but is less smooth.
+The relay paints frames at up to 12 FPS. Direct browser playback is available as an opt-out for
+deployments where the browser can reach the API and native MJPEG playback is preferred.
+
+## Incident evidence and TensorRT
+
+Each newly confirmed threat alert saves its annotated frame as a timestamped JPEG under
+`SV_INCIDENT_DIR` (default `incidents/`). The Incident Log page lists and displays the most recent
+saved frames. Repeated alerts suppressed by the configured per-source/label cooldown do not create
+duplicate evidence files.
+
+Set `SV_MODEL_PATH` to a compatible Ultralytics `.engine` file to load a TensorRT model. The engine
+must be built for the deployment GPU; its FP16/FP32 precision is embedded in the engine, so runtime
+inference leaves the `half` option to TensorRT. `.engine` models require CUDA.
 
 ## Deployment notes
 

@@ -1,7 +1,7 @@
 """Thin HTTP client for the Smart Vision backend."""
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Any, Iterator
 
 import requests
 
@@ -18,7 +18,7 @@ class SmartVisionClient:
         self.timeout = timeout
         self._http = requests.Session()
 
-    def _get_json(self, path: str, **params) -> dict | None:
+    def _get_json(self, path: str, **params) -> Any | None:
         try:
             resp = self._http.get(f"{self.base}{path}", params=params or None, timeout=self.timeout)
             resp.raise_for_status()
@@ -31,6 +31,17 @@ class SmartVisionClient:
 
     def telemetry(self, limit: int = 40) -> dict | None:
         return self._get_json("/api/telemetry", limit=limit)
+
+    def incidents(self) -> list[dict] | None:
+        return self._get_json("/api/incidents")
+
+    def incident_image(self, filename: str) -> bytes:
+        try:
+            resp = self._http.get(f"{self.base}/api/incidents/{filename}", timeout=self.timeout)
+            resp.raise_for_status()
+            return resp.content
+        except requests.RequestException as exc:
+            raise ApiError(f"Could not load incident frame {filename}: {exc}") from exc
 
     def stats(self, source_id: str) -> dict | None:
         return self._get_json(f"/api/sources/{source_id}/stats")
@@ -70,21 +81,46 @@ class SmartVisionClient:
         return f"{self.public}/api/sources/{source_id}/image"
 
     def relay_frames(self, source_id: str, max_fps: int = 12) -> Iterator[bytes]:
-        """Yield JPEG frames parsed from the MJPEG stream (used by the Streamlit relay mode)."""
+        """Yield JPEG payloads from multipart MJPEG without relying on browser access to the API."""
         url = f"{self.base}/api/sources/{source_id}/stream"
         with self._http.get(url, params={"max_fps": max_fps}, stream=True, timeout=(5, 30)) as resp:
             resp.raise_for_status()
-            buf = b""
+            content_type = resp.headers.get("content-type", "")
+            boundary = next(
+                (part.split("=", 1)[1].strip().strip('"')
+                 for part in content_type.split(";") if part.strip().lower().startswith("boundary=")),
+                "",
+            )
+            if not boundary:
+                raise ApiError("Backend stream did not provide a multipart boundary")
+            marker = f"--{boundary}".encode("ascii")
+            buf = bytearray()
             for chunk in resp.iter_content(chunk_size=65536):
-                buf += chunk
+                buf.extend(chunk)
                 while True:
-                    start = buf.find(b"\xff\xd8")
+                    start = buf.find(marker)
                     if start < 0:
-                        buf = b""
+                        if len(buf) > len(marker):
+                            del buf[:-len(marker)]
                         break
-                    end = buf.find(b"\xff\xd9", start + 2)
-                    if end < 0:
-                        buf = buf[start:]
+                    header_end = buf.find(b"\r\n\r\n", start + len(marker))
+                    if header_end < 0:
+                        if start:
+                            del buf[:start]
                         break
-                    yield buf[start : end + 2]
-                    buf = buf[end + 2 :]
+                    header = bytes(buf[start + len(marker):header_end]).lower()
+                    content_length = next(
+                        (int(line.split(b":", 1)[1].strip()) for line in header.split(b"\r\n")
+                         if line.startswith(b"content-length:")),
+                        None,
+                    )
+                    if content_length is None or content_length < 0 or content_length > 32 << 20:
+                        raise ApiError("Backend stream frame is missing a valid Content-Length")
+                    payload_start = header_end + 4
+                    payload_end = payload_start + content_length
+                    if len(buf) < payload_end + 2:
+                        if start:
+                            del buf[:start]
+                        break
+                    yield bytes(buf[payload_start:payload_end])
+                    del buf[:payload_end]

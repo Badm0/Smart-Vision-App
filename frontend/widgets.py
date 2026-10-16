@@ -102,6 +102,22 @@ def telemetry_html(snap: dict | None) -> str:
     )
 
 
+def live_status_html(stats: dict | None) -> str:
+    if not stats:
+        return ""
+    fps = float(stats.get("fps", 0.0))
+    active = bool(stats.get("threat_active"))
+    alert = (
+        "<div class='alarm active' role='alert'>THREAT DETECTED</div>"
+        if active else "<div class='alarm'>NO ACTIVE THREAT</div>"
+    )
+    detections = len(stats.get("detections", []))
+    return (
+        f"<div class='live-metrics'>{alert}<span class='chip'>{fps:.1f} FPS</span>"
+        f"<span class='chip'>DETECTIONS {detections}</span></div>"
+    )
+
+
 def alerts_html(snap: dict | None, limit: int = 12) -> str:
     if snap is None:
         return notice("warn", "Alerts unavailable", "<div>The backend did not respond.</div>")
@@ -215,7 +231,7 @@ html,body{{height:100%;background:transparent;font-family:var(--font-ui);color:v
 """
 
 
-def navbar_html(api_url: str, operator: str, role: str) -> str:
+def navbar_html(operator: str, role: str, health: dict | None) -> str:
     page = """
 <style>
 .bar{height:100%;display:flex;align-items:center;gap:20px;padding:0 4px;border-bottom:1px solid var(--line);background:var(--bg)}
@@ -240,12 +256,12 @@ def navbar_html(api_url: str, operator: str, role: str) -> str:
 <div class="bar">
   <div class="brand">__LOGO__<span>Smart Vision</span></div>
   <div class="grow"></div>
-  <div class="status" id="st" data-s="down" role="status"><span class="dot"></span><span id="stt">Connecting&hellip;</span></div>
+  <div class="status" data-s="__STATUS__" role="status"><span class="dot"></span><span>__STATUS_TEXT__</span></div>
   <div class="user"><div class="av" id="av"></div><div><span id="un"></span><small id="ur"></small></div></div>
   <div class="clock"><b class="data" id="tm">--:--:--</b><small class="data" id="dt"></small></div>
 </div>
 <script>
-const API = __API__, NAME = __NAME__, ROLE = __ROLE__;
+const NAME = __NAME__, ROLE = __ROLE__;
 const $ = id => document.getElementById(id);
 $("un").textContent = NAME; $("ur").textContent = ROLE;
 $("av").textContent = NAME.split(/\\s+/).slice(0,2).map(p => p[0]).join("").toUpperCase();
@@ -254,23 +270,21 @@ function tick(){
   $("tm").textContent = d.toLocaleTimeString([], {hour12:false});
   $("dt").textContent = d.toLocaleDateString([], {weekday:"short", day:"2-digit", month:"short", year:"numeric"});
 }
-function setStatus(s, text){ $("st").dataset.s = s; $("stt").textContent = text; }
-async function health(){
-  try{
-    const r = await fetch(API + "/api/health", {cache:"no-store"});
-    if(!r.ok) throw new Error(r.status);
-    const h = await r.json();
-    if(h.mock) setStatus("warn", "Mock detector (not for production)");
-    else if(h.model_loaded) setStatus("ok", "Backend online \\u00b7 model ready");
-    else setStatus("warn", "Backend online \\u00b7 model not loaded");
-  }catch(e){ setStatus("down", "Backend offline"); }
-}
-tick(); setInterval(tick, 1000); health(); setInterval(health, 4000);
+tick(); setInterval(tick, 1000);
 </script>
 """
+    if health is None:
+        status, status_text = "down", "Backend offline"
+    elif health.get("mock"):
+        status, status_text = "warn", "Backend online · mock detector"
+    elif health.get("model_loaded"):
+        status, status_text = "ok", "Backend online · model ready"
+    else:
+        status, status_text = "warn", "Backend online · model not loaded"
     page = (
         page.replace("__LOGO__", icon("logo", 26))
-        .replace("__API__", _js(api_url))
+        .replace("__STATUS__", status)
+        .replace("__STATUS_TEXT__", escape(status_text))
         .replace("__NAME__", _js(operator))
         .replace("__ROLE__", _js(role))
     )

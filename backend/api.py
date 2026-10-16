@@ -14,7 +14,7 @@ import cv2
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
@@ -200,6 +200,35 @@ async def stream(request: Request, source_id: str, max_fps: float | None = Query
 @app.get("/api/telemetry")
 async def telemetry(request: Request, limit: int = Query(40, ge=1, le=300)) -> dict:
     return request.app.state.telemetry.snapshot(limit)
+
+
+@app.get("/api/incidents")
+async def incidents(request: Request) -> list[dict]:
+    directory = request.app.state.settings.incidents_dir
+    items = []
+    for path in directory.glob("*.jpg"):
+        try:
+            created_at = path.stat().st_mtime
+        except OSError:
+            log.warning("Incident frame disappeared while listing: %s", path)
+            continue
+        items.append({
+            "filename": path.name,
+            "created_at": created_at,
+            "url": f"/api/incidents/{path.name}",
+        })
+    items.sort(key=lambda item: item["created_at"], reverse=True)
+    return items
+
+
+@app.get("/api/incidents/{filename}")
+async def incident_image(request: Request, filename: str) -> FileResponse:
+    if Path(filename).name != filename or Path(filename).suffix.lower() != ".jpg":
+        raise HTTPException(404, "Unknown incident frame")
+    path = request.app.state.settings.incidents_dir / filename
+    if not path.is_file():
+        raise HTTPException(404, "Unknown incident frame")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 class PanicIn(BaseModel):

@@ -42,6 +42,7 @@ class Settings:
     # Incidents
     confirm_frames: int
     alert_cooldown_s: float
+    incidents_dir: Path
     # Uploads
     upload_dir: Path
     max_upload_mb: int
@@ -55,8 +56,11 @@ class Settings:
 def get_settings() -> Settings:
     upload_dir = Path(os.getenv("SV_UPLOAD_DIR", "uploads")).resolve()
     upload_dir.mkdir(parents=True, exist_ok=True)
+    incidents_dir = Path(os.getenv("SV_INCIDENT_DIR", "incidents")).resolve()
+    incidents_dir.mkdir(parents=True, exist_ok=True)
+    default_model = "best.engine" if Path("best.engine").is_file() else "best.pt"
     return Settings(
-        model_path=os.getenv("SV_MODEL_PATH", "best.pt"),
+        model_path=os.getenv("SV_MODEL_PATH") or default_model,
         conf=float(os.getenv("SV_CONF", "0.30")),
         imgsz=int(os.getenv("SV_IMGSZ", "640")),
         device=os.getenv("SV_DEVICE", ""),  # "" = auto (CUDA if available, else CPU)
@@ -74,6 +78,7 @@ def get_settings() -> Settings:
         loop_video=_bool("SV_LOOP_VIDEO", True),
         confirm_frames=max(1, int(os.getenv("SV_CONFIRM_FRAMES", "3"))),
         alert_cooldown_s=float(os.getenv("SV_ALERT_COOLDOWN_S", "6")),
+        incidents_dir=incidents_dir,
         upload_dir=upload_dir,
         max_upload_mb=int(os.getenv("SV_MAX_UPLOAD_MB", "500")),
         max_sources=max(1, int(os.getenv("SV_MAX_SOURCES", "8"))),

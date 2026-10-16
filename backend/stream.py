@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -162,9 +164,33 @@ class FrameProcessor:
             self._streak += 1
             if self._streak >= self.s.confirm_frames:
                 best = max(threats, key=lambda d: d.confidence)
-                self.telemetry.record_threat(best.label, best.confidence, self.source.name)
+                alert = self.telemetry.record_threat(best.label, best.confidence, self.source.name)
+                if alert:
+                    save_incident_frame(result.image, best, self.source, self.s, self.telemetry)
         else:
             self._streak = max(0, self._streak - 1)
+
+
+def save_incident_frame(
+    image: np.ndarray, detection: Detection, source: SourceInfo,
+    settings: Settings, telemetry: TelemetryStore,
+) -> str | None:
+    """Persist an annotated frame for each newly accepted threat alert."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    source_token = re.sub(r"[^A-Za-z0-9-]+", "-", Path(source.name).stem).strip("-")[:32] or "source"
+    label_token = re.sub(r"[^A-Za-z0-9-]+", "-", detection.label).strip("-")[:32] or "threat"
+    filename = f"{timestamp}_{source_token}_{label_token}.jpg"
+    path = settings.incidents_dir / filename
+    try:
+        ok = cv2.imwrite(str(path), image, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        if not ok:
+            raise OSError(f"OpenCV could not encode incident frame {path}")
+    except (OSError, cv2.error) as exc:
+        log.exception("Could not save incident frame for %s", source.name)
+        telemetry.record_event("system", "warning", f"Incident frame could not be saved: {exc}", source.name)
+        return None
+    log.info("Saved incident frame: %s", path)
+    return filename
 
 
 def analyze_image(source: SourceInfo, detector, settings: Settings, telemetry: TelemetryStore) -> list[Detection]:
@@ -180,7 +206,9 @@ def analyze_image(source: SourceInfo, detector, settings: Settings, telemetry: T
     threats = [d for d in result.detections if d.is_threat]
     if threats:  # a still image is one observation: log it immediately
         best = max(threats, key=lambda d: d.confidence)
-        telemetry.record_threat(best.label, best.confidence, source.name)
+        alert = telemetry.record_threat(best.label, best.confidence, source.name)
+        if alert:
+            save_incident_frame(result.image, best, source, settings, telemetry)
     stats = source.stats
     stats.state = "still"
     stats.threat_active = bool(threats)

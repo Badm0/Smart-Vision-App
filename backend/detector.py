@@ -54,7 +54,12 @@ class YoloDetector:
 
         cuda = torch.cuda.is_available()
         self.device = self._s.device or ("0" if cuda else "cpu")
-        self._half = cuda and self.device not in {"cpu", "mps"}
+        is_engine = path.suffix.lower() == ".engine"
+        if is_engine and (not cuda or self.device in {"cpu", "mps"}):
+            self.error = "TensorRT .engine models require a CUDA device (set SV_DEVICE to a CUDA device)"
+            raise RuntimeError(self.error)
+        # TensorRT engines carry their precision in the engine itself (including FP16).
+        self._half = not is_engine and cuda and self.device not in {"cpu", "mps"}
         model = YOLO(str(path))
         # Warm-up so the first live frame does not pay the initialisation cost.
         model.predict(

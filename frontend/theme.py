@@ -130,6 +130,16 @@ iframe {{ border: 0 !important; color-scheme: dark; }}
 .kv dd.big {{ font-size: 1.5rem; font-weight: 500; line-height: 1; }}
 .kv dd.crit {{ color: var(--red-text); }}
 
+/* Live SOC alarm and stream telemetry */
+.live-metrics {{ display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-top: .85rem; }}
+.alarm {{ padding: 5px 9px; border: 1px solid var(--line-2); border-radius: 6px;
+  font: 500 .72rem var(--font-data); color: var(--muted); }}
+.alarm.active {{ border-color: var(--red); background: var(--red); color: var(--on-red);
+  animation: alarm-flash .8s steps(2, start) infinite; }}
+.chip.live {{ background: var(--red-dim); border-color: rgba(239,68,68,.7); color: var(--red-text);
+  animation: alarm-flash .8s steps(2, start) infinite; }}
+@keyframes alarm-flash {{ to {{ opacity: .45; }} }}
+
 /* Alerts feed */
 .alerts {{ list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; display: grid; gap: 6px; }}
 .alert {{ display: grid; grid-template-columns: 18px 1fr auto; gap: .6rem; align-items: start;
