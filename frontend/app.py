@@ -1,4 +1,3 @@
-"""Smart Vision SOC console.  Run from the project root:  streamlit run frontend/app.py"""
 from __future__ import annotations
 
 import os
@@ -8,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import cv2
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -91,6 +91,20 @@ with st.sidebar:
     st.markdown(w.profile_html(OPERATOR, ROLE, STATION), unsafe_allow_html=True)
     page = st.radio("Navigation", NAV, key="nav", label_visibility="collapsed")
     st.markdown(w.side_foot_html(health), unsafe_allow_html=True)
+    
+    # --- إضافة إعدادات الـ SOC الديناميكية ---
+    st.markdown("<hr style='margin: 1rem 0; border-color: #333;'>", unsafe_allow_html=True)
+    st.markdown("<div style='color: #888; font-size: 0.8rem; margin-bottom: 0.5rem;'>⚙️ MODEL SETTINGS</div>", unsafe_allow_html=True)
+    
+    new_conf = st.slider("Confidence", 0.1, 1.0, 0.30, 0.05)
+    new_iou = st.slider("IoU Threshold", 0.1, 1.0, 0.45, 0.05)
+    
+    if st.button("Apply Parameters", use_container_width=True):
+        try:
+            requests.post(f"{API_URL}/update_settings", json={"conf": new_conf, "iou": new_iou})
+            st.success("Applied!")
+        except Exception as e:
+            st.error("Backend not ready.")
 
 
 # ------------------------------------------------------------------ source panel
@@ -101,7 +115,7 @@ def source_panel() -> None:
         "Video or image", type=ACCEPTED, key="uploader", label_visibility="collapsed", disabled=not ready,
     )
     if uploaded is None:
-        if ss.upload_key is not None:  # file removed from the uploader: stop the feed
+        if ss.upload_key is not None:
             ss.source, ss.upload_key, ss.upload_error = None, None, None
     else:
         file_key = getattr(uploaded, "file_id", None) or f"{uploaded.name}:{uploaded.size}"
@@ -163,41 +177,58 @@ def panic_panel() -> None:
     st.markdown(w.panic_result_html(ss.panic_result), unsafe_allow_html=True)
 
 
+# ------------------------------------------------------------------ Relay Video Logic
 def close_relay_stream() -> None:
-    frames = ss.get("_relay_frames")
-    if frames is not None:
-        frames.close()
-    ss["_relay_frames"] = None
-    ss["_relay_source_id"] = None
-
-
-@st.fragment(run_every=0.1)
-def relay_video_fragment(source_id: str) -> None:
-    if ss.get("_relay_source_id") != source_id or ss.get("_relay_frames") is None:
-        close_relay_stream()
-        ss["_relay_source_id"] = source_id
-        ss["_relay_frames"] = client.relay_frames(source_id)
-    try:
-        jpg = next(ss["_relay_frames"])
-    except StopIteration:
-        close_relay_stream()
-        st.info("Video stream ended.")
-    except (requests.RequestException, ApiError) as exc:
-        close_relay_stream()
-        st.markdown(
-            w.notice("error", "Relay interrupted", f"<div>{w.escape(str(exc))}</div>"),
-            unsafe_allow_html=True,
-        )
-    else:
-        st.image(jpg, output_format="JPEG")
-
+    pass
 
 def render_relay(source: dict) -> None:
     if source["kind"] == "image":
-        close_relay_stream()
-        st.image(client.image_bytes(source["id"]))
+        st.image(client.image_bytes(source["id"]), use_container_width=True)
     else:
-        relay_video_fragment(source["id"])
+        video_placeholder = st.empty()
+        stream_url = client.stream_url(source["id"])
+        
+        try:
+            cap = cv2.VideoCapture(stream_url)
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    video_placeholder.image(frame, use_container_width=True)
+                else:
+                    st.info("Video stream ended.")
+                    break
+            cap.release()
+        except Exception as exc:
+            st.warning(f"Relay interrupted: {exc}")
+
+
+# ------------------------------------------------------------------ Live Incidents Fragment
+@st.fragment(run_every="2s")
+def live_incidents_fragment() -> None:
+    images = get_incidents()
+    if not images:
+        st.info("لا توجد أسلحة مكتشفة حتى الآن.")
+        return
+        
+    recent_images = images[:4] # عرض آخر 4 لقطات فقط بالأسفل
+    cols = st.columns(4)
+    for col, item in zip(cols, recent_images):
+        with col:
+            try:
+                img_source = client.incident_image(item["filename"])
+                if isinstance(img_source, str):
+                    local_url = img_source.replace(PUBLIC_API_URL, API_URL)
+                    res = requests.get(local_url, timeout=5)
+                    if res.status_code == 200:
+                        st.image(res.content, use_container_width=True)
+                else:
+                    st.image(img_source, use_container_width=True)
+                
+                time_str = time.strftime("%H:%M:%S", time.gmtime(item["created_at"]))
+                st.caption(f"⏱️ {time_str}")
+            except Exception:
+                pass
 
 
 # ------------------------------------------------------------------ pages
@@ -232,16 +263,31 @@ def page_live() -> None:
                          "<code>uvicorn backend.api:app --port 8000</code>.</div>"),
                 unsafe_allow_html=True,
             )
+        
         src = ss.source
-        if relay and src:
-            render_relay(src)
-        else:
-            html = w.stage_html(
-                PUBLIC_API_URL, src,
-                client.stream_url(src["id"]) if src else None,
-                client.image_url(src["id"]) if src else None,
-            )
-            embed(html, w.STAGE_HEIGHT)
+        
+        # 1. إعداد حاويات الشاشة (حاوية للفيديو فوق، وحاوية لصور الأسلحة تحت)
+        video_container = st.container()
+        incidents_container = st.container()
+        
+        # 2. تحميل الصور في الحاوية السفلية
+        if src:
+            with incidents_container:
+                st.markdown("<hr style='border-color: #333; margin: 1rem 0;'>", unsafe_allow_html=True)
+                st.markdown("<h4 style='color: #ff4b4b;'>🔴 التهديدات المباشرة (لقطات الأسلحة)</h4>", unsafe_allow_html=True)
+                live_incidents_fragment()
+
+        # 3. تشغيل البث المباشر في الحاوية العلوية
+        with video_container:
+            if relay and src:
+                render_relay(src)
+            elif not relay and src:
+                html = w.stage_html(
+                    PUBLIC_API_URL, src,
+                    client.stream_url(src["id"]) if src else None,
+                    client.image_url(src["id"]) if src else None,
+                )
+                embed(html, w.STAGE_HEIGHT)
 
 
 def page_incidents() -> None:
@@ -267,13 +313,23 @@ def page_incidents() -> None:
                 for column, item in zip(columns, images[start:start + 3]):
                     with column:
                         try:
-                            st.image(client.incident_image(item["filename"]), use_container_width=True)
+                            img_source = client.incident_image(item["filename"])
+                            if isinstance(img_source, str):
+                                local_url = img_source.replace(PUBLIC_API_URL, API_URL)
+                                res = requests.get(local_url, timeout=5)
+                                if res.status_code == 200:
+                                    st.image(res.content, use_container_width=True)
+                                else:
+                                    st.error("صورة غير متاحة")
+                            else:
+                                st.image(img_source, use_container_width=True)
+                                
                             caption = time.strftime(
                                 "%Y-%m-%d %H:%M:%S UTC", time.gmtime(item["created_at"])
                             )
                             st.caption(f"{item['filename']} · {caption}")
-                        except ApiError as exc:
-                            st.warning(str(exc))
+                        except Exception:
+                            st.warning("خطأ في الاتصال")
 
     table()
 
