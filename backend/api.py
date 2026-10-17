@@ -87,7 +87,7 @@ async def health(request: Request) -> dict:
         "error": det.error,
         "mock": det.mock,
         "device": det.device,
-        "conf": s.conf,
+        "conf": getattr(s, 'conf', 0.30),
         "imgsz": s.imgsz,
         "preprocess": {"clahe": s.clahe, "clahe_clip": s.clahe_clip, "denoise": s.denoise},
         "sources": request.app.state.sources.count(),
@@ -259,3 +259,29 @@ async def panic(request: Request, body: PanicIn) -> dict:
     store.record_event("panic", "critical" if ok else "warning",
                        "Panic alert delivered to webhook" if ok else f"Panic alert FAILED to deliver: {detail}")
     return {"delivered": ok, "channel": "webhook", "detail": detail}
+
+
+# ------------------------------------------------------------------
+# الإعدادات الديناميكية (Dynamic Settings Endpoint)
+# ------------------------------------------------------------------
+class SettingsUpdate(BaseModel):
+    conf: float
+    iou: float
+
+@app.post("/update_settings")
+async def update_settings(request: Request, body: SettingsUpdate) -> dict:
+    s = request.app.state.settings
+    det = request.app.state.detector
+    
+    # تحديث إعدادات التطبيق
+    s.conf = body.conf
+    setattr(s, 'iou', body.iou)
+    
+    # تحديث إعدادات المودل مباشرة إذا كان يدعمها
+    if hasattr(det, 'conf'):
+        det.conf = body.conf
+    if hasattr(det, 'iou'):
+        det.iou = body.iou
+        
+    log.info(f"Model settings updated: conf={body.conf}, iou={body.iou}")
+    return {"message": "Settings updated successfully", "conf": body.conf, "iou": body.iou}
