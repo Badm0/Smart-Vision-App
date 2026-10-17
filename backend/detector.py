@@ -39,6 +39,10 @@ class YoloDetector:
         self._half = False
         self.device = "cpu"
         self.error: str | None = None
+        
+        # المتغيرات الديناميكية اللي راح تتحدث من الـ API
+        self.conf = settings.conf
+        self.iou = getattr(settings, 'iou', 0.45)
 
     @property
     def ready(self) -> bool:
@@ -61,15 +65,16 @@ class YoloDetector:
         # TensorRT engines carry their precision in the engine itself (including FP16).
         self._half = not is_engine and cuda and self.device not in {"cpu", "mps"}
         model = YOLO(str(path))
+        
         # Warm-up so the first live frame does not pay the initialisation cost.
         model.predict(
             np.zeros((self._s.imgsz, self._s.imgsz, 3), np.uint8),
-            conf=self._s.conf, imgsz=self._s.imgsz, device=self.device,
+            conf=self.conf, iou=self.iou, imgsz=self._s.imgsz, device=self.device,
             half=self._half, verbose=False,
         )
         self._model = model
         self.error = None
-        log.info("Model loaded: %s on %s (conf=%.2f)", path, self.device, self._s.conf)
+        log.info("Model loaded: %s on %s (conf=%.2f, iou=%.2f)", path, self.device, self.conf, self.iou)
 
     def _is_threat(self, label: str) -> bool:
         classes = self._s.threat_classes
@@ -79,11 +84,14 @@ class YoloDetector:
         """Run inference on a preprocessed BGR image. Boxes are in the input image's coordinates."""
         if self._model is None:
             raise RuntimeError("Detector is not loaded")
+        
         with self._lock:  # Ultralytics predictors are not thread-safe
+            # تمرير القيم الديناميكية (conf و iou) بدلاً من القيم الثابتة
             result = self._model.predict(
-                image_bgr, conf=self._s.conf, imgsz=self._s.imgsz, device=self.device,
+                image_bgr, conf=self.conf, iou=self.iou, imgsz=self._s.imgsz, device=self.device,
                 half=self._half, max_det=50, verbose=False,
             )[0]
+            
         boxes = result.boxes
         if boxes is None or len(boxes) == 0:
             return []
@@ -114,6 +122,8 @@ class MockDetector:
 
     def __init__(self, settings: Settings) -> None:
         self._n = 0
+        self.conf = settings.conf
+        self.iou = getattr(settings, 'iou', 0.45)
 
     def load(self) -> None:  # noqa: D401
         return None
