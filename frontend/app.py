@@ -25,11 +25,13 @@ NAV = ["Live Monitor", "Incident Log", "System Status"]
 ACCEPTED = ["mp4", "avi", "mov", "mkv", "webm", "m4v", "jpg", "jpeg", "png", "bmp", "webp"]
 
 st.set_page_config(page_title="Smart Vision", layout="wide", initial_sidebar_state="expanded")
-st.markdown(theme.CSS, unsafe_allow_html=True)
+
+# 🛑 الحل الجذري لمشكلة ظهور الـ CSS كنص: تغليف الكود إجبارياً وإزالة المسافات الوهمية
+safe_css = theme.CSS.strip() if "<style>" in theme.CSS else f"<style>\n{theme.CSS.strip()}\n</style>"
+st.markdown(safe_css, unsafe_allow_html=True)
 
 
 def embed(html: str, height: int) -> None:
-    """Render trusted, self-built HTML in an iframe (st.iframe on current Streamlit, else the legacy API)."""
     if hasattr(st, "iframe"):
         st.iframe(html, height=height)
     else:
@@ -70,14 +72,14 @@ health = get_health()
 # ------------------------------------------------------------------ polled panels
 @st.fragment(run_every="1s")
 def telemetry_fragment(source_id: str | None = None) -> None:
-    st.markdown(w.telemetry_html(get_snapshot()), unsafe_allow_html=True)
+    st.markdown(w.telemetry_html(get_snapshot()).strip(), unsafe_allow_html=True)
     if source_id:
-        st.markdown(w.live_status_html(client.stats(source_id)), unsafe_allow_html=True)
+        st.markdown(w.live_status_html(client.stats(source_id)).strip(), unsafe_allow_html=True)
 
 
 @st.fragment(run_every="1s")
 def alerts_fragment() -> None:
-    st.markdown(w.alerts_html(get_snapshot()), unsafe_allow_html=True)
+    st.markdown(w.alerts_html(get_snapshot()).strip(), unsafe_allow_html=True)
 
 
 @st.fragment(run_every="3s")
@@ -89,11 +91,11 @@ def navbar_fragment() -> None:
 navbar_fragment()
 
 with st.sidebar:
-    st.markdown(w.profile_html(OPERATOR, ROLE, STATION), unsafe_allow_html=True)
+    # 🛑 استخدام strip() هنا لمنع ظهور كود الـ HTML كنص في القائمة الجانبية
+    st.markdown(w.profile_html(OPERATOR, ROLE, STATION).strip(), unsafe_allow_html=True)
     page = st.radio("Navigation", NAV, key="nav", label_visibility="collapsed")
-    st.markdown(w.side_foot_html(health), unsafe_allow_html=True)
+    st.markdown(w.side_foot_html(health).strip(), unsafe_allow_html=True)
     
-    # --- إضافة إعدادات الـ SOC الديناميكية ---
     st.markdown("<hr style='margin: 1rem 0; border-color: #333;'>", unsafe_allow_html=True)
     st.markdown("<div style='color: #888; font-size: 0.8rem; margin-bottom: 0.5rem;'>⚙️ MODEL SETTINGS</div>", unsafe_allow_html=True)
     
@@ -110,7 +112,7 @@ with st.sidebar:
 
 # ------------------------------------------------------------------ source panel
 def source_panel() -> None:
-    st.markdown(w.panel_title("upload", "Video source"), unsafe_allow_html=True)
+    st.markdown(w.panel_title("upload", "Video source").strip(), unsafe_allow_html=True)
     ready = bool(health and health["model_loaded"])
     uploaded = st.file_uploader(
         "Video or image", type=ACCEPTED, key="uploader", label_visibility="collapsed", disabled=not ready,
@@ -135,11 +137,11 @@ def source_panel() -> None:
         reason = (health or {}).get("error") if health else None
         st.markdown(
             w.notice("warn", "Uploads disabled",
-                     f"<div>{'Backend offline.' if not health else 'Model not loaded.'} {reason or ''}</div>"),
+                     f"<div>{'Backend offline.' if not health else 'Model not loaded.'} {reason or ''}</div>").strip(),
             unsafe_allow_html=True,
         )
     if ss.upload_error:
-        st.markdown(w.notice("error", "Could not use this file", f"<div>{w.escape(ss.upload_error)}</div>"),
+        st.markdown(w.notice("error", "Could not use this file", f"<div>{w.escape(ss.upload_error)}</div>").strip(),
                     unsafe_allow_html=True)
     elif ss.source:
         s = ss.source
@@ -154,8 +156,8 @@ def source_panel() -> None:
 
 # ------------------------------------------------------------------ panic widget
 def panic_panel() -> None:
-    st.markdown(w.panel_title("radio", "Panic link"), unsafe_allow_html=True)
-    st.markdown(w.panic_status_html(health), unsafe_allow_html=True)
+    st.markdown(w.panel_title("radio", "Panic link").strip(), unsafe_allow_html=True)
+    st.markdown(w.panic_status_html(health).strip(), unsafe_allow_html=True)
     if ss.panic_armed:
         configured = bool(health and health["panic_webhook_configured"])
         copy = ("This sends an alert to the configured channel." if configured
@@ -175,7 +177,7 @@ def panic_panel() -> None:
         if st.button("Trigger panic alert", key="panic_arm", disabled=health is None):
             ss.panic_armed, ss.panic_result = True, None
             st.rerun()
-    st.markdown(w.panic_result_html(ss.panic_result), unsafe_allow_html=True)
+    st.markdown(w.panic_result_html(ss.panic_result).strip(), unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------ Relay Video Logic (Base64 + OpenCV)
@@ -194,19 +196,12 @@ def render_relay(source: dict) -> None:
             while cap.isOpened():
                 ret, frame = cap.read()
                 if ret:
-                    # 1. ضغط الإطار كصورة JPEG خفيفة
                     _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    
-                    # 2. تشفير الصورة كنص Base64
                     b64 = base64.b64encode(buffer).decode("utf-8")
-                    
-                    # 3. حقن الصورة مباشرة في الواجهة بدون أي HTTP Request
                     video_placeholder.markdown(
                         f"<img src='data:image/jpeg;base64,{b64}' style='width: 100%; border-radius: 8px;'>",
                         unsafe_allow_html=True
                     )
-                    
-                    # 4. تحديد السرعة بـ ~30 إطار بالثانية لمنع اختناق المعالج
                     time.sleep(0.03)
                 else:
                     st.info("Video stream ended.")
@@ -224,7 +219,7 @@ def live_incidents_fragment() -> None:
         st.info("لا توجد أسلحة مكتشفة حتى الآن.")
         return
         
-    recent_images = images[:4] # عرض آخر 4 لقطات فقط بالأسفل
+    recent_images = images[:4]
     cols = st.columns(4)
     for col, item in zip(cols, recent_images):
         with col:
@@ -260,12 +255,12 @@ def page_live() -> None:
         close_relay_stream()
 
     with tele_box:
-        st.markdown(w.panel_title("activity", "Daily telemetry", time.strftime("%d %b %Y")), unsafe_allow_html=True)
+        st.markdown(w.panel_title("activity", "Daily telemetry", time.strftime("%d %b %Y")).strip(), unsafe_allow_html=True)
         telemetry_fragment(ss.source["id"] if ss.source else None)
     with panic_box:
         panic_panel()
     with alert_box:
-        st.markdown(w.panel_title("bell", "Live alerts"), unsafe_allow_html=True)
+        st.markdown(w.panel_title("bell", "Live alerts").strip(), unsafe_allow_html=True)
         alerts_fragment()
 
     with main:
@@ -273,24 +268,20 @@ def page_live() -> None:
             st.markdown(
                 w.notice("error", "Backend unreachable",
                          f"<div>No response from <code>{w.escape(API_URL)}</code>. Start it from the project root with "
-                         "<code>uvicorn backend.api:app --port 8000</code>.</div>"),
+                         "<code>uvicorn backend.api:app --port 8000</code>.</div>").strip(),
                 unsafe_allow_html=True,
             )
         
         src = ss.source
-        
-        # 1. إعداد حاويات الشاشة (حاوية للفيديو فوق، وحاوية لصور الأسلحة تحت)
         video_container = st.container()
         incidents_container = st.container()
         
-        # 2. تحميل الصور في الحاوية السفلية
         if src:
             with incidents_container:
                 st.markdown("<hr style='border-color: #333; margin: 1rem 0;'>", unsafe_allow_html=True)
                 st.markdown("<h4 style='color: #ff4b4b;'>🔴 التهديدات المباشرة (لقطات الأسلحة)</h4>", unsafe_allow_html=True)
                 live_incidents_fragment()
 
-        # 3. تشغيل البث المباشر في الحاوية العلوية
         with video_container:
             if relay and src:
                 render_relay(src)
@@ -311,11 +302,11 @@ def page_incidents() -> None:
     @st.fragment(run_every="2s")
     def table() -> None:
         with st.container(border=True):
-            st.markdown(w.incident_table_html(get_snapshot(300)), unsafe_allow_html=True)
-        st.markdown(w.panel_title("alert", "Saved incident frames"), unsafe_allow_html=True)
+            st.markdown(w.incident_table_html(get_snapshot(300)).strip(), unsafe_allow_html=True)
+        st.markdown(w.panel_title("alert", "Saved incident frames").strip(), unsafe_allow_html=True)
         images = get_incidents()
         if images is None:
-            st.markdown(w.notice("warn", "Frames unavailable", "<div>The backend did not respond.</div>"),
+            st.markdown(w.notice("warn", "Frames unavailable", "<div>The backend did not respond.</div>").strip(),
                         unsafe_allow_html=True)
         elif not images:
             st.markdown("<div class='empty'><b>No saved frames</b>Annotated frames are saved when a threat alert is confirmed.</div>",
@@ -355,7 +346,7 @@ def page_system() -> None:
     @st.fragment(run_every="3s")
     def status() -> None:
         with st.container(border=True):
-            st.markdown(w.system_html(get_health(), API_URL), unsafe_allow_html=True)
+            st.markdown(w.system_html(get_health(), API_URL).strip(), unsafe_allow_html=True)
 
     status()
 
