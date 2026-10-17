@@ -40,7 +40,6 @@ class YoloDetector:
         self.device = "cpu"
         self.error: str | None = None
         
-        # المتغيرات الديناميكية اللي راح تتحدث من الـ API
         self.conf = settings.conf
         self.iou = getattr(settings, 'iou', 0.45)
 
@@ -53,20 +52,19 @@ class YoloDetector:
         if not path.is_file():
             self.error = f"Model weights not found at {path.resolve()} (set SV_MODEL_PATH)"
             raise FileNotFoundError(self.error)
-        from ultralytics import YOLO  # imported lazily: heavy, and optional for mock/tests
+        from ultralytics import YOLO
         import torch
 
         cuda = torch.cuda.is_available()
         self.device = self._s.device or ("0" if cuda else "cpu")
         is_engine = path.suffix.lower() == ".engine"
         if is_engine and (not cuda or self.device in {"cpu", "mps"}):
-            self.error = "TensorRT .engine models require a CUDA device (set SV_DEVICE to a CUDA device)"
+            self.error = "TensorRT .engine models require a CUDA device"
             raise RuntimeError(self.error)
-        # TensorRT engines carry their precision in the engine itself (including FP16).
+        
         self._half = not is_engine and cuda and self.device not in {"cpu", "mps"}
         model = YOLO(str(path))
         
-        # Warm-up so the first live frame does not pay the initialisation cost.
         model.predict(
             np.zeros((self._s.imgsz, self._s.imgsz, 3), np.uint8),
             conf=self.conf, iou=self.iou, imgsz=self._s.imgsz, device=self.device,
@@ -74,19 +72,17 @@ class YoloDetector:
         )
         self._model = model
         self.error = None
-        log.info("Model loaded: %s on %s (conf=%.2f, iou=%.2f)", path, self.device, self.conf, self.iou)
+        log.info("Model loaded: %s on %s", path, self.device)
 
     def _is_threat(self, label: str) -> bool:
         classes = self._s.threat_classes
         return not classes or label.lower() in classes
 
     def predict(self, image_bgr: np.ndarray) -> list[Detection]:
-        """Run inference on a preprocessed BGR image. Boxes are in the input image's coordinates."""
         if self._model is None:
             raise RuntimeError("Detector is not loaded")
         
-        with self._lock:  # Ultralytics predictors are not thread-safe
-            # تمرير القيم الديناميكية (conf و iou) بدلاً من القيم الثابتة
+        with self._lock:
             result = self._model.predict(
                 image_bgr, conf=self.conf, iou=self.iou, imgsz=self._s.imgsz, device=self.device,
                 half=self._half, max_det=50, verbose=False,
@@ -95,26 +91,31 @@ class YoloDetector:
         boxes = result.boxes
         if boxes is None or len(boxes) == 0:
             return []
+            
         xyxy = boxes.xyxy.cpu().numpy()
-        conf = boxes.conf.cpu().numpy()
+        scores = boxes.conf.cpu().numpy()
         cls = boxes.cls.cpu().numpy().astype(int)
         names = result.names
         detections = []
-        for box, score, k in zip(xyxy, conf, cls):
+        
+        for box, score, k in zip(xyxy, scores, cls):
+            # 1. فلترة العرض: لا تعرض أي شيء أقل من قيمة السلايدر
+            if float(score) < float(self.conf):
+                continue
+                
             label = str(names.get(int(k), k))
+            
+            # 2. فلترة الحفظ الإجبارية: يعتبر "تهديد حقيقي" (ويتم حفظ صورته) فقط إذا كانت النسبة 60% فما فوق
+            is_real_threat = self._is_threat(label) and float(score) >= 0.60
+            
             detections.append(
-                Detection(label, float(score), tuple(float(v) for v in box), self._is_threat(label))
+                Detection(label, float(score), tuple(float(v) for v in box), is_real_threat)
             )
+            
         return detections
 
 
 class MockDetector:
-    """Development-only stand-in that emits a periodic fake box. Enabled with SV_MOCK_DETECTOR=1.
-
-    It exists so the UI and API can be exercised without weights. It detects nothing real, and the
-    health endpoint reports `mock: true` so the UI can say so.
-    """
-
     mock = True
     device = "mock"
     error: str | None = None
@@ -125,7 +126,7 @@ class MockDetector:
         self.conf = settings.conf
         self.iou = getattr(settings, 'iou', 0.45)
 
-    def load(self) -> None:  # noqa: D401
+    def load(self) -> None:
         return None
 
     def predict(self, image_bgr: np.ndarray) -> list[Detection]:
