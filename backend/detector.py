@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import threading
+import asyncio
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,7 +64,11 @@ class YoloDetector:
             self.error = "TensorRT .engine models require a CUDA device"
             raise RuntimeError(self.error)
         
-        self._half = not is_engine and cuda and self.device not in {"cpu", "mps"}
+        # ربط الـ FP16 بمتغير البيئة لتسريع المعالجة في كولاب
+        _hf_flag = os.getenv("SV_HALF_PRECISION", "0")
+        enable_half = _hf_flag.strip() == "1"
+        self._half = not is_engine and cuda and self.device not in {"cpu", "mps"} and enable_half
+        
         model = YOLO(str(path))
         
         model.predict(
@@ -72,7 +78,7 @@ class YoloDetector:
         )
         self._model = model
         self.error = None
-        log.info("Model loaded: %s on %s", path, self.device)
+        log.info("Model loaded: %s on %s (FP16: %s)", path, self.device, self._half)
 
     def _is_threat(self, label: str) -> bool:
         classes = self._s.threat_classes
@@ -83,6 +89,7 @@ class YoloDetector:
             raise RuntimeError("Detector is not loaded")
         
         with self._lock:
+            # التحليل بالدقة الكاملة (بدون Downscale)
             result = self._model.predict(
                 image_bgr, conf=self.conf, iou=self.iou, imgsz=self._s.imgsz, device=self.device,
                 half=self._half, max_det=50, verbose=False,
@@ -114,6 +121,10 @@ class YoloDetector:
             
         return detections
 
+    async def predict_async(self, image_bgr: np.ndarray) -> list[Detection]:
+        """التحليل غير المتزامن للسماح بمعالجة أكثر من كاميرا في نفس الوقت بدون تجميد السيرفر"""
+        return await asyncio.to_thread(self.predict, image_bgr)
+
 
 class MockDetector:
     mock = True
@@ -135,6 +146,9 @@ class MockDetector:
             return []
         h, w = image_bgr.shape[:2]
         return [Detection("mock-weapon", 0.87, (w * 0.34, h * 0.30, w * 0.66, h * 0.70), True)]
+
+    async def predict_async(self, image_bgr: np.ndarray) -> list[Detection]:
+        return await asyncio.to_thread(self.predict, image_bgr)
 
 
 def create_detector(settings: Settings) -> YoloDetector | MockDetector:
