@@ -176,7 +176,11 @@ class FrameProcessor:
 def send_telegram_alert(image_path: str, label: str, conf: float, source_name: str):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    
+    print(f"\n[Telegram Debug] Triggered! Token exists: {bool(token)}, ChatID exists: {bool(chat_id)}")
+    
     if not token or not chat_id:
+        print("[Telegram Debug] ❌ خطأ: التوكن أو الأيدي غير موجودات! تأكد من إضافتها لخلية التشغيل.")
         return
     
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
@@ -184,9 +188,10 @@ def send_telegram_alert(image_path: str, label: str, conf: float, source_name: s
     
     try:
         with open(image_path, 'rb') as photo:
-            requests.post(url, data={'chat_id': chat_id, 'caption': caption}, files={'photo': photo}, timeout=10)
+            res = requests.post(url, data={'chat_id': chat_id, 'caption': caption}, files={'photo': photo}, timeout=10)
+            print(f"[Telegram Debug] 📩 نتيجة الإرسال: {res.status_code} - {res.text}")
     except Exception as e:
-        log.error(f"Telegram alert failed: {e}")
+        print(f"[Telegram Debug] ❌ مشكلة بالاتصال: {e}")
 
 
 def save_incident_frame(
