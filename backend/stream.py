@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import logging
+import requests
 import re
 import threading
 import time
+import os
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -171,6 +173,22 @@ class FrameProcessor:
             self._streak = max(0, self._streak - 1)
 
 
+def send_telegram_alert(image_path: str, label: str, conf: float, source_name: str):
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+    
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    caption = f"🚨 إنذار أمني (Smart Vision)!\n\n🔍 التهديد: {label.upper()}\n🎯 الدقة: {conf*100:.0f}%\n🎥 الكاميرا: {source_name}"
+    
+    try:
+        with open(image_path, 'rb') as photo:
+            requests.post(url, data={'chat_id': chat_id, 'caption': caption}, files={'photo': photo}, timeout=10)
+    except Exception as e:
+        log.error(f"Telegram alert failed: {e}")
+
+
 def save_incident_frame(
     image: np.ndarray, detection: Detection, source: SourceInfo,
     settings: Settings, telemetry: TelemetryStore,
@@ -189,7 +207,16 @@ def save_incident_frame(
         log.exception("Could not save incident frame for %s", source.name)
         telemetry.record_event("system", "warning", f"Incident frame could not be saved: {exc}", source.name)
         return None
+        
     log.info("Saved incident frame: %s", path)
+    
+    # إرسال التنبيه للتليجرام بخيط منفصل (Thread)
+    threading.Thread(
+        target=send_telegram_alert, 
+        args=(str(path), detection.label, detection.confidence, source.name),
+        daemon=True
+    ).start()
+    
     return filename
 
 
